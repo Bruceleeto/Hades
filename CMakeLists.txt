@@ -128,3 +128,13 @@ else()
         Threads::Threads
     )
 endif()
+
+
+
+if(BUILD_DREAMCAST)
+    add_custom_command(TARGET hades POST_BUILD
+        COMMAND mkdcdisc -e $<TARGET_FILE:hades> -d ../assets -o hades.cdi -N
+        COMMENT "Creating Dreamcast CDI disc image..."
+        VERBATIM
+    )
+endif()

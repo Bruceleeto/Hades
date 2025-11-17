@@ -9,12 +9,12 @@
 #include "gba/event.h"
 #include <kos/fs.h>
 
-#define ROM_PATH    "/cd/assets/test.gba"
-#define BIOS_PATH   "/cd/assets/bios.bin"
+#define ROM_PATH    "/cd/assets/test.bin"
+#define BIOS_PATH   "/cd/assets/gba_bios.bin"
 #define SAVE_PATH   "pokemon.sav"
 
-#define TEX_WIDTH   256  // Next power of 2 from 240
-#define TEX_HEIGHT  256  // Next power of 2 from 160
+#define TEX_WIDTH   256
+#define TEX_HEIGHT  256
 #define GBA_WIDTH   240
 #define GBA_HEIGHT  160
 
@@ -28,11 +28,9 @@ struct {
     pthread_t gba_thread;
     bool running;
     
-    // PVR rendering
     pvr_ptr_t pvram;
     uint32_t *pvram_sq;
     
-    // Previous controller state for edge detection
     uint32_t prev_buttons;
 } app;
 
@@ -47,10 +45,21 @@ void *load_file(const char *path, size_t *size_out) {
         return NULL;
     }
     
-    size_t size = fs_total(f);
-    void *data = malloc(size);
+    int data_size = fs_total(f);
+    if (data_size <= 0) {
+        fprintf(stderr, "Invalid file size for %s\n", path);
+        fs_close(f);
+        return NULL;
+    }
     
-    if (fs_read(f, data, size) != (ssize_t)size) {
+    void *data = malloc(data_size);
+    if (!data) {
+        fprintf(stderr, "Failed to allocate memory for %s\n", path);
+        fs_close(f);
+        return NULL;
+    }
+    
+    if (fs_read(f, data, data_size) != data_size) {
         fprintf(stderr, "Failed to read %s\n", path);
         free(data);
         fs_close(f);
@@ -58,7 +67,7 @@ void *load_file(const char *path, size_t *size_out) {
     }
     
     fs_close(f);
-    if (size_out) *size_out = size;
+    if (size_out) *size_out = (size_t)data_size;
     return data;
 }
 
@@ -129,15 +138,13 @@ bool gba_load_and_start(const char *rom_path, const char *bios_path, const char 
     if (save_data) {
         msg.config.backup_storage.data = save_data;
         msg.config.backup_storage.size = save_size;
-        printf("Loaded save file: %s\n", save_path);
     }
     
     // Configure settings
-    msg.config.skip_bios = false;  
+    msg.config.skip_bios = false;
     msg.config.backup_storage.type = BACKUP_FLASH128;
     msg.config.gpio_device_type = GPIO_NONE;
     
-    // GBA settings
     msg.config.settings.speed = 1.0f;
     msg.config.settings.fast_forward = false;
     msg.config.settings.prefetch_buffer = true;
@@ -149,25 +156,20 @@ bool gba_load_and_start(const char *rom_path, const char *bios_path, const char 
     
     send_message(&msg.header);
     
-    printf("ROM loaded: %s\n", rom_path);
+    printf("ROM loaded: %s (%zu bytes)\n", rom_path, rom_size);
     return true;
 }
 
 // ============================================================================
-// Controller Input Handling
+// Controller Input
 // ============================================================================
 
 void handle_controller_input(void) {
     if (!app.controller) {
-        // Try to find a controller
         app.controller = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-        if (app.controller) {
-            printf("Controller connected\n");
-        }
         return;
     }
     
-    // Get controller state
     cont_state_t *state = (cont_state_t *)maple_dev_status(app.controller);
     if (!state) {
         app.controller = NULL;
@@ -200,7 +202,7 @@ void handle_controller_input(void) {
     if (released & CONT_Y)          gba_send_key(KEY_R, false);
     if (released & CONT_START)      gba_send_key(KEY_START, false);
     
-    // Check for exit condition (A+B+X+Y+Start)
+    // Exit on A+B+X+Y+Start
     if ((curr_buttons & CONT_RESET_BUTTONS) == CONT_RESET_BUTTONS) {
         app.running = false;
     }
@@ -215,11 +217,10 @@ void handle_controller_input(void) {
 void present_gba_frame(void) {
     if (!app.pvram_sq) return;
     
-    // Lock and copy GBA framebuffer to VRAM
     gba_shared_framebuffer_lock(app.gba);
     uint32_t *src = (uint32_t *)app.gba->shared_data.framebuffer.data;
     
-    // Convert ABGR8888 to RGB565 and copy to texture memory
+    // Convert ABGR8888 to RGB565
     for (int y = 0; y < GBA_HEIGHT; y++) {
         uint32_t *dest_line32 = app.pvram_sq + (TEX_WIDTH / 2) * y;
         uint16_t *dest_line16 = (uint16_t *)dest_line32;
@@ -236,7 +237,7 @@ void present_gba_frame(void) {
     
     gba_shared_framebuffer_release(app.gba);
     
-    // Render the texture as a fullscreen quad
+    // Render fullscreen quad
     pvr_wait_ready();
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_OP_POLY);
@@ -256,26 +257,21 @@ void present_gba_frame(void) {
     vert.oargb = 0;
     vert.flags = PVR_CMD_VERTEX;
     
-    // Calculate UV coordinates for actual GBA resolution within texture
     float u_max = (float)GBA_WIDTH / TEX_WIDTH;
     float v_max = (float)GBA_HEIGHT / TEX_HEIGHT;
     
-    // Top-left
     vert.x = 0.0f; vert.y = 0.0f; vert.z = 1.0f;
     vert.u = 0.0f; vert.v = 0.0f;
     pvr_prim(&vert, sizeof(vert));
     
-    // Top-right
     vert.x = 640.0f; vert.y = 0.0f;
     vert.u = u_max; vert.v = 0.0f;
     pvr_prim(&vert, sizeof(vert));
     
-    // Bottom-left
     vert.x = 0.0f; vert.y = 480.0f;
     vert.u = 0.0f; vert.v = v_max;
     pvr_prim(&vert, sizeof(vert));
     
-    // Bottom-right
     vert.x = 640.0f; vert.y = 480.0f;
     vert.u = u_max; vert.v = v_max;
     vert.flags = PVR_CMD_VERTEX_EOL;
@@ -286,27 +282,21 @@ void present_gba_frame(void) {
 }
 
 // ============================================================================
-// System Initialization
+// System Init/Cleanup
 // ============================================================================
 
 bool init_system(void) {
-    // Initialize PVR
     pvr_init_defaults();
     
-    // Allocate texture memory
     app.pvram = pvr_mem_malloc(TEX_WIDTH * TEX_HEIGHT * 2);
     if (!app.pvram) {
         fprintf(stderr, "Failed to allocate PVR memory\n");
         return false;
     }
     
-    // Get store queue address
     app.pvram_sq = (uint32_t *)(((uintptr_t)app.pvram & 0xFFFFFF) | PVR_TA_TEX_MEM);
     
-    // Initialize controller subsystem
     cont_init();
-    
-
     return true;
 }
 
@@ -314,7 +304,6 @@ void cleanup(void) {
     if (app.pvram) {
         pvr_mem_free(app.pvram);
     }
-    
     cont_shutdown();
     pvr_shutdown();
 }
@@ -327,8 +316,7 @@ int main(int argc, char *argv[]) {
     memset(&app, 0, sizeof(app));
     app.running = true;
     
-    printf("Hades GBA Emulator - Dreamcast KOS Build\n");
-    printf("=========================================\n");
+    printf("Hades GBA Emulator\n");
     
     if (!init_system()) {
         return EXIT_FAILURE;
@@ -356,7 +344,6 @@ int main(int argc, char *argv[]) {
     }
     
     // Cleanup
-    printf("Shutting down...\n");
     gba_send_exit();
     pthread_join(app.gba_thread, NULL);
     gba_delete(app.gba);
