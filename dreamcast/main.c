@@ -280,7 +280,6 @@ bool init_sdl(void) {
     }
     
     app.audio_freq = have.freq;
-    SDL_PauseAudioDevice(app.audio_device, 0);  // Start audio
     
     printf("Audio: %d Hz, %d channels\n", have.freq, have.channels);
     return true;
@@ -325,7 +324,8 @@ int main(int argc, char *argv[]) {
         cleanup();
         return EXIT_FAILURE;
     }
-    
+    SDL_PauseAudioDevice(app.audio_device, 0);
+
     // Start GBA thread
     pthread_create(&app.gba_thread, NULL, (void *(*)(void *))gba_run, app.gba);
     
