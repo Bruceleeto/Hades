@@ -9,9 +9,13 @@ include_directories(include source)
 
 # Compiler flags
 add_compile_options(
+    -g 
+    -pg              
     -fms-extensions
     -Wno-microsoft-anon-tag
 )
+
+add_link_options(-Wl,-Map=output.map -pg)
 
 add_compile_definitions(HADES_VERSION="1.0.0")
 
