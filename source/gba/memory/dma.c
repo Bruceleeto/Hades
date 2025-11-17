@@ -102,7 +102,7 @@ dma_run_channel(
             case 0b01:      dst_step = -unit_size; break;
             case 0b10:      dst_step = 0; break;
             case 0b11:      dst_step = unit_size; break;
-            default:        __unreachable;
+            default: __unreachable(); break;
         }
     }
 
@@ -111,7 +111,7 @@ dma_run_channel(
         case 0b01:      src_step = -unit_size; break;
         case 0b10:      src_step = 0; break;
         case 0b11:      src_step = 0; break;
-        default:        __unreachable;
+            default: __unreachable(); break;
     }
 
     logln(
