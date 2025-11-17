@@ -1,31 +1,22 @@
-
-#include <SDL2/SDL.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dc/pvr.h>
+#include <dc/maple.h>
+#include <dc/maple/controller.h>
 #include "gba/gba.h"
 #include "gba/event.h"
+#include <kos/fs.h>
 
-
-#define ROM_PATH    "test.gba"
-#define BIOS_PATH   "bios.bin"
+#define ROM_PATH    "/cd/assets/test.gba"
+#define BIOS_PATH   "/cd/assets/bios.bin"
 #define SAVE_PATH   "pokemon.sav"
-#define WINDOW_SCALE 3
 
-// Key mappings
-#define SDL_KEY_UP      SDLK_w
-#define SDL_KEY_DOWN    SDLK_s
-#define SDL_KEY_LEFT    SDLK_a
-#define SDL_KEY_RIGHT   SDLK_d
-#define SDL_KEY_A       SDLK_p
-#define SDL_KEY_B       SDLK_l
-#define SDL_KEY_L       SDLK_e
-#define SDL_KEY_R       SDLK_o
-#define SDL_KEY_START   SDLK_RETURN
-#define SDL_KEY_SELECT  SDLK_BACKSPACE
-#define SDL_KEY_QUIT    SDLK_ESCAPE
-
+#define TEX_WIDTH   256  // Next power of 2 from 240
+#define TEX_HEIGHT  256  // Next power of 2 from 160
+#define GBA_WIDTH   240
+#define GBA_HEIGHT  160
 
 // ============================================================================
 // Global State
@@ -33,56 +24,40 @@
 
 struct {
     struct gba *gba;
-    SDL_Window *window;
-    SDL_Renderer *renderer;
-    SDL_Texture *framebuffer_tex;
-    SDL_AudioDeviceID audio_device;
+    maple_device_t *controller;
     pthread_t gba_thread;
     bool running;
-    int audio_freq;
-} app;
-
-// ============================================================================
-// Audio Callback
-// ============================================================================
-
-void audio_callback(void *userdata, uint8_t *raw_stream, int raw_len) {
-    int16_t *stream = (int16_t *)raw_stream;
-    size_t len = raw_len / (2 * sizeof(int16_t));
     
-    gba_shared_audio_rbuffer_lock(app.gba);
-    for (size_t i = 0; i < len; ++i) {
-        uint32_t sample = gba_shared_audio_rbuffer_pop_sample(app.gba);
-        stream[i * 2 + 0] = (int16_t)((sample >> 16) & 0xFFFF); 
-        stream[i * 2 + 1] = (int16_t)(sample & 0xFFFF);         
-    }
-    gba_shared_audio_rbuffer_release(app.gba);
-}
+    // PVR rendering
+    pvr_ptr_t pvram;
+    uint32_t *pvram_sq;
+    
+    // Previous controller state for edge detection
+    uint32_t prev_buttons;
+} app;
 
 // ============================================================================
 // File Loading
 // ============================================================================
 
 void *load_file(const char *path, size_t *size_out) {
-    FILE *f = fopen(path, "rb");
+    file_t f = fs_open(path, O_RDONLY);
     if (!f) {
         fprintf(stderr, "Failed to open %s\n", path);
         return NULL;
     }
     
-    fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
-    rewind(f);
+    size_t size = fs_total(f);
+    void *data = malloc(size);
     
-    void *data = calloc(1, size);
-    if (fread(data, 1, size, f) != size) {
+    if (fs_read(f, data, size) != (ssize_t)size) {
         fprintf(stderr, "Failed to read %s\n", path);
         free(data);
-        fclose(f);
+        fs_close(f);
         return NULL;
     }
     
-    fclose(f);
+    fs_close(f);
     if (size_out) *size_out = size;
     return data;
 }
@@ -159,8 +134,7 @@ bool gba_load_and_start(const char *rom_path, const char *bios_path, const char 
     
     // Configure settings
     msg.config.skip_bios = false;  
-    msg.config.audio_frequency = GBA_CYCLES_PER_SECOND / app.audio_freq;
-    msg.config.backup_storage.type = BACKUP_FLASH128;  // Auto-detect or hardcode
+    msg.config.backup_storage.type = BACKUP_FLASH128;
     msg.config.gpio_device_type = GPIO_NONE;
     
     // GBA settings
@@ -180,189 +154,205 @@ bool gba_load_and_start(const char *rom_path, const char *bios_path, const char 
 }
 
 // ============================================================================
-// Input Handling
+// Controller Input Handling
 // ============================================================================
 
-void handle_key(SDL_Keycode key, bool pressed) {
-    switch (key) {
-        case SDL_KEY_UP:     gba_send_key(KEY_UP, pressed); break;
-        case SDL_KEY_DOWN:   gba_send_key(KEY_DOWN, pressed); break;
-        case SDL_KEY_LEFT:   gba_send_key(KEY_LEFT, pressed); break;
-        case SDL_KEY_RIGHT:  gba_send_key(KEY_RIGHT, pressed); break;
-        case SDL_KEY_A:      gba_send_key(KEY_A, pressed); break;
-        case SDL_KEY_B:      gba_send_key(KEY_B, pressed); break;
-        case SDL_KEY_L:      gba_send_key(KEY_L, pressed); break;
-        case SDL_KEY_R:      gba_send_key(KEY_R, pressed); break;
-        case SDL_KEY_START:  gba_send_key(KEY_START, pressed); break;
-        case SDL_KEY_SELECT: gba_send_key(KEY_SELECT, pressed); break;
-        case SDL_KEY_QUIT:   if (pressed) app.running = false; break;
-    }
-}
-
-void handle_events(void) {
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
-        switch (event.type) {
-            case SDL_QUIT:
-                app.running = false;
-                break;
-            case SDL_KEYDOWN:
-                handle_key(event.key.keysym.sym, true);
-                break;
-            case SDL_KEYUP:
-                handle_key(event.key.keysym.sym, false);
-                break;
+void handle_controller_input(void) {
+    if (!app.controller) {
+        // Try to find a controller
+        app.controller = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+        if (app.controller) {
+            printf("Controller connected\n");
         }
+        return;
     }
+    
+    // Get controller state
+    cont_state_t *state = (cont_state_t *)maple_dev_status(app.controller);
+    if (!state) {
+        app.controller = NULL;
+        return;
+    }
+    
+    uint32_t curr_buttons = state->buttons;
+    uint32_t pressed = curr_buttons & ~app.prev_buttons;
+    uint32_t released = ~curr_buttons & app.prev_buttons;
+    
+    // Handle button presses
+    if (pressed & CONT_DPAD_UP)    gba_send_key(KEY_UP, true);
+    if (pressed & CONT_DPAD_DOWN)  gba_send_key(KEY_DOWN, true);
+    if (pressed & CONT_DPAD_LEFT)  gba_send_key(KEY_LEFT, true);
+    if (pressed & CONT_DPAD_RIGHT) gba_send_key(KEY_RIGHT, true);
+    if (pressed & CONT_A)          gba_send_key(KEY_A, true);
+    if (pressed & CONT_B)          gba_send_key(KEY_B, true);
+    if (pressed & CONT_X)          gba_send_key(KEY_L, true);
+    if (pressed & CONT_Y)          gba_send_key(KEY_R, true);
+    if (pressed & CONT_START)      gba_send_key(KEY_START, true);
+    
+    // Handle button releases
+    if (released & CONT_DPAD_UP)    gba_send_key(KEY_UP, false);
+    if (released & CONT_DPAD_DOWN)  gba_send_key(KEY_DOWN, false);
+    if (released & CONT_DPAD_LEFT)  gba_send_key(KEY_LEFT, false);
+    if (released & CONT_DPAD_RIGHT) gba_send_key(KEY_RIGHT, false);
+    if (released & CONT_A)          gba_send_key(KEY_A, false);
+    if (released & CONT_B)          gba_send_key(KEY_B, false);
+    if (released & CONT_X)          gba_send_key(KEY_L, false);
+    if (released & CONT_Y)          gba_send_key(KEY_R, false);
+    if (released & CONT_START)      gba_send_key(KEY_START, false);
+    
+    // Check for exit condition (A+B+X+Y+Start)
+    if ((curr_buttons & CONT_RESET_BUTTONS) == CONT_RESET_BUTTONS) {
+        app.running = false;
+    }
+    
+    app.prev_buttons = curr_buttons;
 }
 
 // ============================================================================
-// Initialization
+// Rendering
 // ============================================================================
 
-bool init_sdl(void) {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
-        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+void present_gba_frame(void) {
+    if (!app.pvram_sq) return;
+    
+    // Lock and copy GBA framebuffer to VRAM
+    gba_shared_framebuffer_lock(app.gba);
+    uint32_t *src = (uint32_t *)app.gba->shared_data.framebuffer.data;
+    
+    // Convert ABGR8888 to RGB565 and copy to texture memory
+    for (int y = 0; y < GBA_HEIGHT; y++) {
+        uint32_t *dest_line32 = app.pvram_sq + (TEX_WIDTH / 2) * y;
+        uint16_t *dest_line16 = (uint16_t *)dest_line32;
+        sq_lock(dest_line32);
+        for (int x = 0; x < GBA_WIDTH; x++) {
+            uint32_t abgr = src[y * GBA_WIDTH + x];
+            uint8_t r = abgr & 0xFF;
+            uint8_t g = (abgr >> 8) & 0xFF;
+            uint8_t b = (abgr >> 16) & 0xFF;
+            dest_line16[x] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3);
+        }
+        sq_unlock();
+    }
+    
+    gba_shared_framebuffer_release(app.gba);
+    
+    // Render the texture as a fullscreen quad
+    pvr_wait_ready();
+    pvr_scene_begin();
+    pvr_list_begin(PVR_LIST_OP_POLY);
+    
+    pvr_poly_cxt_t cxt;
+    pvr_poly_hdr_t hdr;
+    pvr_vertex_t vert;
+    
+    pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY,
+        PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED,
+        TEX_WIDTH, TEX_HEIGHT, app.pvram, PVR_FILTER_BILINEAR);
+    
+    pvr_poly_compile(&hdr, &cxt);
+    pvr_prim(&hdr, sizeof(hdr));
+    
+    vert.argb = PVR_PACK_COLOR(1.0f, 1.0f, 1.0f, 1.0f);
+    vert.oargb = 0;
+    vert.flags = PVR_CMD_VERTEX;
+    
+    // Calculate UV coordinates for actual GBA resolution within texture
+    float u_max = (float)GBA_WIDTH / TEX_WIDTH;
+    float v_max = (float)GBA_HEIGHT / TEX_HEIGHT;
+    
+    // Top-left
+    vert.x = 0.0f; vert.y = 0.0f; vert.z = 1.0f;
+    vert.u = 0.0f; vert.v = 0.0f;
+    pvr_prim(&vert, sizeof(vert));
+    
+    // Top-right
+    vert.x = 640.0f; vert.y = 0.0f;
+    vert.u = u_max; vert.v = 0.0f;
+    pvr_prim(&vert, sizeof(vert));
+    
+    // Bottom-left
+    vert.x = 0.0f; vert.y = 480.0f;
+    vert.u = 0.0f; vert.v = v_max;
+    pvr_prim(&vert, sizeof(vert));
+    
+    // Bottom-right
+    vert.x = 640.0f; vert.y = 480.0f;
+    vert.u = u_max; vert.v = v_max;
+    vert.flags = PVR_CMD_VERTEX_EOL;
+    pvr_prim(&vert, sizeof(vert));
+    
+    pvr_list_finish();
+    pvr_scene_finish();
+}
+
+// ============================================================================
+// System Initialization
+// ============================================================================
+
+bool init_system(void) {
+    // Initialize PVR
+    pvr_init_defaults();
+    
+    // Allocate texture memory
+    app.pvram = pvr_mem_malloc(TEX_WIDTH * TEX_HEIGHT * 2);
+    if (!app.pvram) {
+        fprintf(stderr, "Failed to allocate PVR memory\n");
         return false;
     }
     
-    // Create window
-    app.window = SDL_CreateWindow(
-        "Hades GBA Emulator",
-        SDL_WINDOWPOS_CENTERED,
-        SDL_WINDOWPOS_CENTERED,
-        240 * WINDOW_SCALE,
-        160 * WINDOW_SCALE,
-        SDL_WINDOW_SHOWN
-    );
-    if (!app.window) {
-        fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
-        return false;
-    }
+    // Get store queue address
+    app.pvram_sq = (uint32_t *)(((uintptr_t)app.pvram & 0xFFFFFF) | PVR_TA_TEX_MEM);
     
-    // Create software renderer
-    app.renderer = SDL_CreateRenderer(
-        app.window,
-        -1,
-        SDL_RENDERER_SOFTWARE | SDL_RENDERER_PRESENTVSYNC
-    );
-    if (!app.renderer) {
-        fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
-        return false;
-    }
+    // Initialize controller subsystem
+    cont_init();
     
-    // Create framebuffer texture
-    app.framebuffer_tex = SDL_CreateTexture(
-        app.renderer,
-        SDL_PIXELFORMAT_ABGR8888,  // Change from ARGB to ABGR
-        SDL_TEXTUREACCESS_STREAMING,
-        240,
-        160
-    );
-    if (!app.framebuffer_tex) {
-        fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
-        return false;
-    }
-    
-    // Setup audio
-    SDL_AudioSpec want, have;
-    memset(&want, 0, sizeof(want));
-    want.freq = 48000;
-    want.format = AUDIO_S16;
-    want.channels = 2;
-    want.samples = 2048;
-    want.callback = audio_callback;
-    
-    app.audio_device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-    if (!app.audio_device) {
-        fprintf(stderr, "SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
-        return false;
-    }
-    
-    app.audio_freq = have.freq;
-    
-    printf("Audio: %d Hz, %d channels\n", have.freq, have.channels);
+
     return true;
 }
 
 void cleanup(void) {
-    if (app.audio_device) {
-        SDL_CloseAudioDevice(app.audio_device);
+    if (app.pvram) {
+        pvr_mem_free(app.pvram);
     }
-    if (app.framebuffer_tex) {
-        SDL_DestroyTexture(app.framebuffer_tex);
-    }
-    if (app.renderer) {
-        SDL_DestroyRenderer(app.renderer);
-    }
-    if (app.window) {
-        SDL_DestroyWindow(app.window);
-    }
-    SDL_Quit();
+    
+    cont_shutdown();
+    pvr_shutdown();
 }
 
 // ============================================================================
-// Main Loop
+// Main
 // ============================================================================
 
 int main(int argc, char *argv[]) {
     memset(&app, 0, sizeof(app));
     app.running = true;
     
-    printf("Hades GBA Emulator - Minimal Build\n");
-    printf("===================================\n");
+    printf("Hades GBA Emulator - Dreamcast KOS Build\n");
+    printf("=========================================\n");
     
-    // Initialize SDL
-    if (!init_sdl()) {
+    if (!init_system()) {
         return EXIT_FAILURE;
     }
     
-    // Create GBA emulator
     app.gba = gba_create();
     if (!app.gba) {
         fprintf(stderr, "Failed to create GBA\n");
         cleanup();
         return EXIT_FAILURE;
     }
-    SDL_PauseAudioDevice(app.audio_device, 0);
-
-    // Start GBA thread
+    
     pthread_create(&app.gba_thread, NULL, (void *(*)(void *))gba_run, app.gba);
     
-    // Load ROM and start emulation
     if (!gba_load_and_start(ROM_PATH, BIOS_PATH, SAVE_PATH)) {
         app.running = false;
     } else {
         gba_send_run();
     }
     
-    printf("\nControls:\n");
-    printf("  WASD - D-Pad\n");
-    printf("  P/L  - A/B\n");
-    printf("  E/O  - L/R\n");
-    printf("  Enter/Backspace - Start/Select\n");
-    printf("  ESC  - Quit\n\n");
-    
     // Main loop
     while (app.running) {
-        handle_events();
-        
-        // Copy framebuffer from GBA
-        gba_shared_framebuffer_lock(app.gba);
-        SDL_UpdateTexture(
-            app.framebuffer_tex,
-            NULL,
-            app.gba->shared_data.framebuffer.data,
-            240 * 4  // GBA_SCREEN_WIDTH * sizeof(uint32_t)
-        );
-        gba_shared_framebuffer_release(app.gba);
-        
-        // Render
-        SDL_RenderClear(app.renderer);
-        SDL_RenderCopy(app.renderer, app.framebuffer_tex, NULL, NULL);
-        SDL_RenderPresent(app.renderer);
-        
-        SDL_Delay(1);
+        handle_controller_input();
+        present_gba_frame();
     }
     
     // Cleanup

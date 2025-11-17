@@ -7,21 +7,38 @@ set(CMAKE_CXX_STANDARD 11)
 # Include directories
 include_directories(include source)
 
-# Compiler flags
-add_compile_options(
-    -g 
-    -pg              
-    -fms-extensions
-    -Wno-microsoft-anon-tag
-)
+# Detect Dreamcast build (cross-compiling with KallistiOS)
+if(CMAKE_CROSSCOMPILING)
+    set(BUILD_DREAMCAST TRUE)
+    message(STATUS "Building for Dreamcast")
+else()
+    set(BUILD_DREAMCAST FALSE)
+    message(STATUS "Building for Linux")
+endif()
 
-add_link_options(-Wl,-Map=output.map -pg)
+# Platform-specific compiler flags
+if(BUILD_DREAMCAST)
+    add_compile_options(
+        -fms-extensions
+    )
+    add_link_options(-Wl,-Map=output.map)
+else()
+    add_compile_options(
+        -g 
+        -pg              
+        -fms-extensions
+    )
+    add_link_options(-Wl,-Map=output.map -pg)
+endif()
 
 add_compile_definitions(HADES_VERSION="1.0.0")
 
 # Find dependencies
-find_package(SDL2 REQUIRED)
-find_library(MATH_LIBRARY m)
+if(NOT BUILD_DREAMCAST)
+    find_package(SDL2 REQUIRED)
+    find_library(MATH_LIBRARY m)
+    find_package(Threads REQUIRED)
+endif()
 
 ###############################
 ## GBA Core Library
@@ -76,19 +93,38 @@ set(LIBGBA_SOURCES
 )
 
 add_library(gba STATIC ${LIBGBA_SOURCES})
-target_link_libraries(gba ${MATH_LIBRARY})
+
+if(BUILD_DREAMCAST)
+    target_link_libraries(gba m)
+else()
+    target_link_libraries(gba ${MATH_LIBRARY})
+endif()
 
 ###############################
 ## Main Executable
 ###############################
 
-add_executable(hades 
-    dreamcast/main.c
-    dreamcast/log.c
-)
-
-target_link_libraries(hades 
-    gba
-    SDL2::SDL2
-    ${MATH_LIBRARY}
-)
+if(BUILD_DREAMCAST)
+    add_executable(hades 
+        dreamcast/main.c
+        dreamcast/log.c
+    )
+    
+    target_link_libraries(hades 
+        gba
+        m
+        pthread
+    )
+else()
+    add_executable(hades 
+        linux/main.c
+        linux/log.c
+    )
+    
+    target_link_libraries(hades 
+        gba
+        SDL2::SDL2
+        ${MATH_LIBRARY}
+        Threads::Threads
+    )
+endif()

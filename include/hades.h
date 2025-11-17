@@ -43,7 +43,7 @@
 # define __noreturn         __attribute__((noreturn))
 #endif /* !__noreturn */
 #ifndef __unreachable
-# define __unreachable      __builtin_unreachable()
+# define __unreachable()    __builtin_unreachable()
 #endif /* !__unreachable */
 
 /* Panic if the given constant expression evaluates to `false`. */
