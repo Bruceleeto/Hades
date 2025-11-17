@@ -7,7 +7,6 @@ set(CMAKE_CXX_STANDARD 11)
 # Include directories
 include_directories(include source)
 
-# Detect Dreamcast build (cross-compiling with KallistiOS)
 if(CMAKE_CROSSCOMPILING)
     set(BUILD_DREAMCAST TRUE)
     message(STATUS "Building for Dreamcast")
@@ -19,6 +18,7 @@ endif()
 # Platform-specific compiler flags
 if(BUILD_DREAMCAST)
     add_compile_options(
+        -O3
         -fms-extensions
     )
     add_link_options(-Wl,-Map=output.map)
