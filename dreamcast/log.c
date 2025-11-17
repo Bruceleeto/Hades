@@ -71,34 +71,24 @@ disable_colors(
 /*
 ** Log the given formatted string, followed by a `\n`.
 */
-void
-logln(
-    enum modules module,
-    char const *fmt,
-    ...
-) {
+#ifdef ENABLE_LOGGING
+void logln(enum modules module, char const *fmt, ...) {
     va_list va;
-
     if (g_verbose_global && g_verbose[module]) {
         va_start(va, fmt);
-
         printf("[%s] ", modules_str[module]);
-
         if (module == HS_ERROR) {
             printf("%s%s", g_bold, g_light_red);
         }
-
         vprintf(fmt, va);
-
         if (module == HS_ERROR) {
             printf("%s", g_reset);
         }
-
         printf("\n");
-
         va_end(va);
     }
 }
+#endif
 
 /*
 ** Print the given formatted string to stderr and finally exit(1).

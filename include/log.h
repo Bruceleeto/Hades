@@ -72,7 +72,12 @@ static char const * const modules_str[] = {
 };
 
 /* log.c */
-void logln(enum modules module, char const *fmt, ...) __attribute__ ((format (printf, 2, 3)));
+#ifdef ENABLE_LOGGING
+    void logln(enum modules module, char const *fmt, ...) __attribute__ ((format (printf, 2, 3)));
+#else
+    #define logln(...) ((void)0)
+#endif
+
 void panic(enum modules module, char const *fmt, ...) __attribute__ ((format (printf, 2, 3))) __attribute__((noreturn));
 void unimplemented(enum modules module, char const *fmt, ...) __attribute__ ((format (printf, 2, 3))) __attribute__((noreturn));
 void disable_colors(void);
