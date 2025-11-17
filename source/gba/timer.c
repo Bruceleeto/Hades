@@ -61,7 +61,7 @@ timer_schedule_start(
 }
 
 void
-timer_stop(
+timer_stop_gba(
     struct gba *gba,
     uint32_t timer_idx
 ) {

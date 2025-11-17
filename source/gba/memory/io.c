@@ -894,7 +894,7 @@ io_register_delayed_write(
                 if (new_enable) {
                     timer_schedule_start(gba, idx);
                 } else {
-                    timer_stop(gba, idx);
+                    timer_stop_gba(gba, idx);
                 }
             }
             break;

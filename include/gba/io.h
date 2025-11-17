@@ -902,7 +902,7 @@ void io_register_delayed_write(struct gba *gba, struct event_args args);
 
 /* gba/timer.c */
 void timer_overflow(struct gba *gba, struct event_args args);
-void timer_stop(struct gba *gba, uint32_t timer_idx);
+void timer_stop_gba(struct gba *gba, uint32_t timer_idx);
 void timer_schedule_start(struct gba *gba, uint32_t timer_idx);
 uint16_t timer_update_counter(struct gba const *gba, uint32_t timer_idx);
 uint16_t timer_read_value(struct gba const *gba, uint32_t timer_idx);
