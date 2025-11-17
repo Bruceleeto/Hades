@@ -69,19 +69,19 @@ enum access_types {
 #define OAM_REGION              (OAM_START >> 24)
 #define OAM_MASK                (OAM_END - OAM_START)
 #define OAM_SIZE                (OAM_END - OAM_START + 1)
-
+// Limit cart size to 8mb for now
 #define CART_0_START            (0x08000000)
-#define CART_0_END              (0x09FFFFFF)
+#define CART_0_END              (0x087FFFFF)  // Changed from 0x09FFFFFF
 #define CART_0_REGION_1         (CART_0_START >> 24)
 #define CART_0_REGION_2         (CART_0_END >> 24)
 
 #define CART_1_START            (0x0A000000)
-#define CART_1_END              (0x0BFFFFFF)
+#define CART_1_END              (0x0A7FFFFF)  // Changed from 0x0BFFFFFF
 #define CART_1_REGION_1         (CART_1_START >> 24)
 #define CART_1_REGION_2         (CART_1_END >> 24)
 
 #define CART_2_START            (0x0C000000)
-#define CART_2_END              (0x0DFFFFFF)
+#define CART_2_END              (0x0C7FFFFF)  // Changed from 0x0DFFFFFF
 #define CART_2_REGION_1         (CART_2_START >> 24)
 #define CART_2_REGION_2         (CART_2_END >> 24)
 
