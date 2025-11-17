@@ -8,8 +8,8 @@
 #include "gba/event.h"
 
 
-#define ROM_PATH    "test.gba"
-#define BIOS_PATH   "bios.bin"
+#define ROM_PATH    "../assets/test.bin"
+#define BIOS_PATH   "../assets/gba_bios.bin"
 #define SAVE_PATH   "pokemon.sav"
 #define WINDOW_SCALE 3
 

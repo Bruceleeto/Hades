@@ -7,8 +7,6 @@
 /saves
 /quicksaves
 /demos
-*.gba
-*.bin
 config.json
 .hades-dbg.history
 __pycache__
