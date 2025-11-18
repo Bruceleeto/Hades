@@ -15,6 +15,11 @@
 #include "gba/memory.h"
 #include "gba/gpio.h"
 
+
+#define SHZ_FORCE_INLINE         __attribute__((always_inline)) SHZ_INLINE
+//! Prevents GCC from inlining the given function.
+
+
 /*
 ** Region        Bus   Read      Write     Cycles   Note
 ** ==================================================
@@ -242,10 +247,10 @@ mem_openbus_read(
                 }
                 break;
             };
-            default: {
-                panic(HS_MEMORY, "Reading the open bus from an impossible page: %u", pc >> 24);
-                break;
-            };
+                default: {
+                    panic(HS_MEMORY, "Reading the open bus from an impossible page: %u", (unsigned int)(pc >> 24));
+                    break;
+                };
         }
     } else {
         val = gba->core.prefetch[1];
@@ -255,246 +260,409 @@ mem_openbus_read(
 }
 
 /*
-** Read the data of type T located in memory at the given address.
-**
-** T must be either uint32_t, uint16_t or uint8_t.
+** Internal read functions without timing
 */
-#define template_read(T, gba, unaligned_addr)                                               \
-    ({                                                                                      \
-        T _ret = 0;                                                                         \
-        uint32_t _addr;                                                                     \
-                                                                                            \
-        _addr = align(T, (unaligned_addr));                                                 \
-        switch (_addr >> 24) {                                                              \
-            case BIOS_REGION: {                                                             \
-                if (_addr <= BIOS_END) {                                                    \
-                    uint32_t _shift;                                                        \
-                                                                                            \
-                    _shift = 8 * (_addr & 0b11);                                            \
-                    if ((gba)->core.pc <= BIOS_END) {                                       \
-                        _addr = align(uint32_t, _addr);                                     \
-                        (gba)->memory.bios_bus = *(uint32_t *)((uint8_t *)((gba)->memory.bios) + _addr); \
-                    }                                                                       \
-                    _ret = (gba)->memory.bios_bus >> _shift;                                \
-                } else {                                                                    \
-                    logln(HS_MEMORY, "Invalid BIOS read of size %zu from 0x%08x", sizeof(T), _addr); \
-                    _ret = mem_openbus_read((gba), _addr);                                  \
-                }                                                                           \
-                break;                                                                      \
-            };                                                                              \
-            case EWRAM_REGION:                                                              \
-                _ret = *(T *)((uint8_t *)((gba)->memory.ewram) + (_addr & EWRAM_MASK));     \
-                break;                                                                      \
-            case IWRAM_REGION:                                                              \
-                _ret = *(T *)((uint8_t *)((gba)->memory.iwram) + (_addr & IWRAM_MASK));     \
-                break;                                                                      \
-            case IO_REGION:                                                                 \
-                _ret = _Generic(_ret,                                                       \
-                    uint32_t: (                                                             \
-                        ((T)mem_io_read8((gba), _addr + 0) <<  0) |                         \
-                        ((T)mem_io_read8((gba), _addr + 1) <<  8) |                         \
-                        ((T)mem_io_read8((gba), _addr + 2) << 16) |                         \
-                        ((T)mem_io_read8((gba), _addr + 3) << 24)                           \
-                    ),                                                                      \
-                    uint16_t: (                                                             \
-                        ((T)mem_io_read8((gba), _addr + 0) <<  0) |                         \
-                        ((T)mem_io_read8((gba), _addr + 1) <<  8)                           \
-                    ),                                                                      \
-                    default: mem_io_read8((gba), _addr)                                     \
-                );                                                                          \
-                break;                                                                      \
-            case PALRAM_REGION:                                                             \
-                _ret = *(T *)((uint8_t *)((gba)->memory.palram) + (_addr & PALRAM_MASK));   \
-                break;                                                                      \
-            case VRAM_REGION:                                                               \
-                _ret = *(T *)((uint8_t *)((gba)->memory.vram) + (_addr & ((_addr & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2))); \
-                break;                                                                      \
-            case OAM_REGION:                                                                \
-                _ret = *(T *)((uint8_t *)((gba)->memory.oam) + (_addr & OAM_MASK));         \
-                break;                                                                      \
-            case CART_REGION_START ... CART_REGION_END: {                                   \
-                if (unlikely(                                                               \
-                    ((gba)->memory.backup_storage.type == BACKUP_EEPROM_4K || (gba)->memory.backup_storage.type == BACKUP_EEPROM_64K) \
-                    && (_addr & (gba)->memory.backup_storage.chip.eeprom.mask) == (gba)->memory.backup_storage.chip.eeprom.range \
-                )) {                                                                        \
-                    _ret = mem_eeprom_read8(gba);                                           \
-                } else if (unlikely(_addr >= GPIO_REG_START && _addr <= GPIO_REG_END && (gba)->gpio.readable)) { \
-                    _ret = gpio_read_u8((gba), _addr);                                      \
-                } else if (unlikely((_addr & 0x00FFFFFF) >= (gba)->memory.rom_size)) {      \
-                    _ret = _Generic(_ret,                                                   \
-                        uint32_t: (                                                         \
-                            ((_addr >> 1) & 0xFFFF) |                                       \
-                            ((((_addr + 2) >> 1) & 0xFFFF) << 16)                           \
-                        ),                                                                  \
-                        uint16_t: (                                                         \
-                            (_addr >> 1) & 0xFFFF                                           \
-                        ),                                                                  \
-                        default: ((_addr >> (1 + 8 * (_addr & 0b1))) & 0xFF)                \
-                    );                                                                      \
-                } else {                                                                    \
-                    _ret = *(T *)((uint8_t *)((gba)->memory.rom) + (_addr & CART_MASK));    \
-                }                                                                           \
-                break;                                                                      \
-            };                                                                              \
-            case SRAM_REGION:                                                               \
-            case SRAM_MIRROR_REGION: {                                                      \
-                _ret = _Generic(_ret,                                                       \
-                    uint32_t: (                                                             \
-                        ((T)mem_backup_storage_read8((gba), (unaligned_addr)) * 0x01010101) \
-                    ),                                                                      \
-                    uint16_t: (                                                             \
-                        ((T)mem_backup_storage_read8((gba), (unaligned_addr)) * 0x0101)     \
-                    ),                                                                      \
-                    default: mem_backup_storage_read8((gba), (unaligned_addr))              \
-                );                                                                          \
-                break;                                                                      \
-            };                                                                              \
-            default: {                                                                      \
-                logln(HS_MEMORY, "Invalid read of size %zu from 0x%08x", sizeof(T), _addr); \
-                _ret = mem_openbus_read((gba), _addr);                                      \
-                break;                                                                      \
-            }                                                                               \
-        };                                                                                  \
-        _ret;                                                                               \
-    })
+static inline __attribute__((always_inline)) uint8_t mem_read8_internal(struct gba *gba, uint32_t addr) {
+    uint32_t region = addr >> 24;
+    
+    switch (region) {
+        case BIOS_REGION: {
+            if (addr <= BIOS_END) {
+                uint32_t shift = 8 * (addr & 0b11);
+                if (gba->core.pc <= BIOS_END) {
+                    uint32_t aligned = addr & ~3;
+                    gba->memory.bios_bus = *(uint32_t *)((uint8_t *)gba->memory.bios + aligned);
+                }
+                return gba->memory.bios_bus >> shift;
+            } else {
+                logln(HS_MEMORY, "Invalid BIOS read of size 1 from 0x%08x", addr);
+                return mem_openbus_read(gba, addr);
+            }
+        }
+        
+        case EWRAM_REGION:
+            return gba->memory.ewram[addr & EWRAM_MASK];
+            
+        case IWRAM_REGION:
+            return gba->memory.iwram[addr & IWRAM_MASK];
+            
+        case IO_REGION:
+            return mem_io_read8(gba, addr);
+            
+        case PALRAM_REGION:
+            return gba->memory.palram[addr & PALRAM_MASK];
+            
+        case VRAM_REGION:
+            return gba->memory.vram[addr & ((addr & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2)];
+            
+        case OAM_REGION:
+            return gba->memory.oam[addr & OAM_MASK];
+            
+        case CART_REGION_START ... CART_REGION_END: {
+            if (unlikely(
+                (gba->memory.backup_storage.type == BACKUP_EEPROM_4K || 
+                 gba->memory.backup_storage.type == BACKUP_EEPROM_64K) &&
+                (addr & gba->memory.backup_storage.chip.eeprom.mask) == 
+                 gba->memory.backup_storage.chip.eeprom.range
+            )) {
+                return mem_eeprom_read8(gba);
+            } else if (unlikely(addr >= GPIO_REG_START && addr <= GPIO_REG_END && gba->gpio.readable)) {
+                return gpio_read_u8(gba, addr);
+            } else if (unlikely((addr & 0x00FFFFFF) >= gba->memory.rom_size)) {
+                return (addr >> (1 + 8 * (addr & 1))) & 0xFF;
+            } else {
+                return gba->memory.rom[addr & CART_MASK];
+            }
+        }
+        
+        case SRAM_REGION:
+        case SRAM_MIRROR_REGION:
+            return mem_backup_storage_read8(gba, addr);
+            
+        default:
+            logln(HS_MEMORY, "Invalid read of size 1 from 0x%08x", addr);
+            return mem_openbus_read(gba, addr);
+    }
+}
+
+static inline __attribute__((always_inline)) uint16_t mem_read16_internal(struct gba *gba, uint32_t addr) {
+    addr &= ~1;  // Align to 16-bit
+    uint32_t region = addr >> 24;
+    
+    switch (region) {
+        case BIOS_REGION: {
+            if (addr <= BIOS_END) {
+                uint32_t shift = 8 * (addr & 0b11);
+                if (gba->core.pc <= BIOS_END) {
+                    uint32_t aligned = addr & ~3;
+                    gba->memory.bios_bus = *(uint32_t *)((uint8_t *)gba->memory.bios + aligned);
+                }
+                return gba->memory.bios_bus >> shift;
+            } else {
+                logln(HS_MEMORY, "Invalid BIOS read of size 2 from 0x%08x", addr);
+                return mem_openbus_read(gba, addr);
+            }
+        }
+        
+        case EWRAM_REGION:
+            return *(uint16_t *)&gba->memory.ewram[addr & EWRAM_MASK];
+            
+        case IWRAM_REGION:
+            return *(uint16_t *)&gba->memory.iwram[addr & IWRAM_MASK];
+            
+        case IO_REGION:
+            return (mem_io_read8(gba, addr + 0) <<  0) |
+                   (mem_io_read8(gba, addr + 1) <<  8);
+            
+        case PALRAM_REGION:
+            return *(uint16_t *)&gba->memory.palram[addr & PALRAM_MASK];
+            
+        case VRAM_REGION:
+            return *(uint16_t *)&gba->memory.vram[addr & ((addr & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2)];
+            
+        case OAM_REGION:
+            return *(uint16_t *)&gba->memory.oam[addr & OAM_MASK];
+            
+        case CART_REGION_START ... CART_REGION_END: {
+            if (unlikely(
+                (gba->memory.backup_storage.type == BACKUP_EEPROM_4K || 
+                 gba->memory.backup_storage.type == BACKUP_EEPROM_64K) &&
+                (addr & gba->memory.backup_storage.chip.eeprom.mask) == 
+                 gba->memory.backup_storage.chip.eeprom.range
+            )) {
+                return mem_eeprom_read8(gba);
+            } else if (unlikely(addr >= GPIO_REG_START && addr <= GPIO_REG_END && gba->gpio.readable)) {
+                return gpio_read_u8(gba, addr);
+            } else if (unlikely((addr & 0x00FFFFFF) >= gba->memory.rom_size)) {
+                return (addr >> 1) & 0xFFFF;
+            } else {
+                return *(uint16_t *)&gba->memory.rom[addr & CART_MASK];
+            }
+        }
+        
+        case SRAM_REGION:
+        case SRAM_MIRROR_REGION: {
+            uint8_t byte = mem_backup_storage_read8(gba, addr);
+            return byte | (byte << 8);  // SRAM repeats the byte
+        }
+            
+        default:
+            logln(HS_MEMORY, "Invalid read of size 2 from 0x%08x", addr);
+            return mem_openbus_read(gba, addr);
+    }
+}
+
+static inline __attribute__((always_inline)) uint32_t mem_read32_internal(struct gba *gba, uint32_t addr) {
+    addr &= ~3;  // Align to 32-bit
+    uint32_t region = addr >> 24;
+    
+    switch (region) {
+        case BIOS_REGION: {
+            if (addr <= BIOS_END) {
+                uint32_t shift = 8 * (addr & 0b11);
+                if (gba->core.pc <= BIOS_END) {
+                    uint32_t aligned = addr & ~3;
+                    gba->memory.bios_bus = *(uint32_t *)((uint8_t *)gba->memory.bios + aligned);
+                }
+                return gba->memory.bios_bus >> shift;
+            } else {
+                logln(HS_MEMORY, "Invalid BIOS read of size 4 from 0x%08x", addr);
+                return mem_openbus_read(gba, addr);
+            }
+        }
+        
+        case EWRAM_REGION:
+            return *(uint32_t *)&gba->memory.ewram[addr & EWRAM_MASK];
+            
+        case IWRAM_REGION:
+            return *(uint32_t *)&gba->memory.iwram[addr & IWRAM_MASK];
+            
+        case IO_REGION:
+            return (mem_io_read8(gba, addr + 0) <<  0) |
+                   (mem_io_read8(gba, addr + 1) <<  8) |
+                   (mem_io_read8(gba, addr + 2) << 16) |
+                   (mem_io_read8(gba, addr + 3) << 24);
+            
+        case PALRAM_REGION:
+            return *(uint32_t *)&gba->memory.palram[addr & PALRAM_MASK];
+            
+        case VRAM_REGION:
+            return *(uint32_t *)&gba->memory.vram[addr & ((addr & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2)];
+            
+        case OAM_REGION:
+            return *(uint32_t *)&gba->memory.oam[addr & OAM_MASK];
+            
+        case CART_REGION_START ... CART_REGION_END: {
+            if (unlikely(
+                (gba->memory.backup_storage.type == BACKUP_EEPROM_4K || 
+                 gba->memory.backup_storage.type == BACKUP_EEPROM_64K) &&
+                (addr & gba->memory.backup_storage.chip.eeprom.mask) == 
+                 gba->memory.backup_storage.chip.eeprom.range
+            )) {
+                return mem_eeprom_read8(gba);
+            } else if (unlikely(addr >= GPIO_REG_START && addr <= GPIO_REG_END && gba->gpio.readable)) {
+                return gpio_read_u8(gba, addr);
+            } else if (unlikely((addr & 0x00FFFFFF) >= gba->memory.rom_size)) {
+                return ((addr >> 1) & 0xFFFF) | ((((addr + 2) >> 1) & 0xFFFF) << 16);
+            } else {
+                return *(uint32_t *)&gba->memory.rom[addr & CART_MASK];
+            }
+        }
+        
+        case SRAM_REGION:
+        case SRAM_MIRROR_REGION: {
+            uint8_t byte = mem_backup_storage_read8(gba, addr);
+            return byte * 0x01010101;  // SRAM repeats the byte
+        }
+            
+        default:
+            logln(HS_MEMORY, "Invalid read of size 4 from 0x%08x", addr);
+            return mem_openbus_read(gba, addr);
+    }
+}
 
 /*
-** Write a data of type T to memory at the given address.
-**
-** T must be either uint32_t, uint16_t or uint8_t.
+** Internal write functions without timing
 */
-#define template_write(T, gba, unaligned_addr, val)                                             \
-    ({                                                                                          \
-        uint32_t _addr;                                                                         \
-                                                                                                \
-        _addr = align(T, (unaligned_addr));                                                     \
-        switch (_addr >> 24) {                                                                  \
-            case BIOS_REGION:                                                                   \
-                /* Ignore writes attempts to the bios memory. */                                \
-                break;                                                                          \
-            case EWRAM_REGION:                                                                  \
-                *(T *)((uint8_t *)((gba)->memory.ewram) + (_addr & EWRAM_MASK)) = (T)(val);     \
-                break;                                                                          \
-            case IWRAM_REGION:                                                                  \
-                *(T *)((uint8_t *)((gba)->memory.iwram) + (_addr & IWRAM_MASK)) = (T)(val);     \
-                break;                                                                          \
-            case IO_REGION:                                                                     \
-                _Generic(val,                                                                   \
-                    uint32_t: ({                                                                \
-                        mem_io_write8((gba), _addr + 0, (uint8_t)((val) >>  0));                \
-                        mem_io_write8((gba), _addr + 1, (uint8_t)((val) >>  8));                \
-                        mem_io_write8((gba), _addr + 2, (uint8_t)((val) >> 16));                \
-                        mem_io_write8((gba), _addr + 3, (uint8_t)((val) >> 24));                \
-                    }),                                                                         \
-                    uint16_t: ({                                                                \
-                        mem_io_write8((gba), _addr + 0, (uint8_t)((val) >>  0));                \
-                        mem_io_write8((gba), _addr + 1, (uint8_t)((val) >>  8));                \
-                    }),                                                                         \
-                    default: ({                                                                 \
-                        mem_io_write8((gba), _addr, (val));                                     \
-                    })                                                                          \
-                );                                                                              \
-                break;                                                                          \
-            case PALRAM_REGION: {                                                               \
-                _Generic(val,                                                                   \
-                    uint32_t: ({                                                                \
-                        *(T *)((uint8_t *)((gba)->memory.palram) + (_addr & PALRAM_MASK)) = (T)(val); \
-                    }),                                                                         \
-                    uint16_t: ({                                                                \
-                        *(T *)((uint8_t *)((gba)->memory.palram) + (_addr & PALRAM_MASK)) = (T)(val); \
-                    }),                                                                         \
-                    default: ({                                                                 \
-                        /* u8 writes to PALRAM are writting to both the upper/lower bytes */    \
-                        addr &= ~(sizeof(uint16_t) - 1);                                        \
-                        *(T *)((uint8_t *)((gba)->memory.palram) + (_addr & PALRAM_MASK)) = (T)(val); \
-                        *(T *)((uint8_t *)((gba)->memory.palram) + ((_addr + 1) & PALRAM_MASK)) = (T)(val); \
-                    })                                                                          \
-                );                                                                              \
-                break;                                                                          \
-            };                                                                                  \
-            case VRAM_REGION: {                                                                 \
-                _Generic(val,                                                                   \
-                    uint32_t: ({                                                                \
-                        *(T *)((uint8_t *)((gba)->memory.vram) + (_addr & ((_addr & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2))) = (T)(val); \
-                    }),                                                                         \
-                    uint16_t: ({                                                                \
-                        *(T *)((uint8_t *)((gba)->memory.vram) + (_addr & ((_addr & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2))) = (T)(val); \
-                    }),                                                                         \
-                    default: ({                                                                 \
-                        uint32_t new_addr;                                                      \
-                                                                                                \
-                        new_addr = _addr & 0x1FFFF;                                             \
-                        /*
-                        ** Ignore u8 write attemps to OBJ VRAM memory
-                        ** OBJ VRAM size is different depending on the BG mode.
-                        */                                                                      \
-                        if (                                                                    \
-                            ((gba)->io.dispcnt.bg_mode <= 2 && (new_addr) < 0x10000)            \
-                            || ((gba)->io.dispcnt.bg_mode >= 3 && (new_addr) < 0x14000)         \
-                        ) {                                                                     \
-                            addr &= ~(sizeof(uint16_t) - 1);                                    \
-                            *(T *)((uint8_t *)((gba)->memory.vram) + (_addr & ((_addr & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2))) = (T)(val); \
-                            *(T *)((uint8_t *)((gba)->memory.vram) + ((_addr + 1) & (((_addr + 1) & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2))) = (T)(val); \
-                        }                                                                       \
-                    })                                                                          \
-                );                                                                              \
-                break;                                                                          \
-            };                                                                                  \
-            case OAM_REGION: {                                                                  \
-                _Generic(val,                                                                   \
-                    uint32_t: ({                                                                \
-                        *(T *)((uint8_t *)((gba)->memory.oam) + (_addr & OAM_MASK)) = (T)(val); \
-                    }),                                                                         \
-                    uint16_t: ({                                                                \
-                        *(T *)((uint8_t *)((gba)->memory.oam) + (_addr & OAM_MASK)) = (T)(val); \
-                    }),                                                                         \
-                    default: ({                                                                 \
-                        /* Ignore u8 write attemps to OAM memory */                             \
-                    })                                                                          \
-                );                                                                              \
-                break;                                                                          \
-            };                                                                                  \
-            case CART_REGION_START ... CART_REGION_END: {                                       \
-                if (((gba)->memory.backup_storage.type == BACKUP_EEPROM_4K || (gba)->memory.backup_storage.type == BACKUP_EEPROM_64K) \
-                    && (_addr & (gba)->memory.backup_storage.chip.eeprom.mask) == (gba)->memory.backup_storage.chip.eeprom.range \
-                ) {                                                                             \
-                    mem_eeprom_write8((gba), (val) & 1);                                        \
-                } else if (_addr >= GPIO_REG_START && _addr <= GPIO_REG_END) {                  \
-                    gpio_write_u8((gba), _addr, (val));                                         \
-                }                                                                               \
-                /* Ignore writes attempts to the cartridge memory. */                           \
-                break;                                                                          \
-            };                                                                                  \
-            case SRAM_REGION:                                                                   \
-            case SRAM_MIRROR_REGION:                                                            \
-                /*
-                ** All writes to the backup storage are u8 writes, eventually rotated if the
-                ** address isn't aligned on T.
-                */                                                                              \
-                mem_backup_storage_write8(                                                      \
-                    (gba),                                                                      \
-                    (unaligned_addr),                                                           \
-                    ((val) >> (8 * ((unaligned_addr) % sizeof(T))))                             \
-                );                                                                              \
-                break;                                                                          \
-            default: {                                                                          \
-                logln(HS_MEMORY, "Invalid write of size %zu to 0x%08x", sizeof(T), _addr);      \
-                break;                                                                          \
-            };                                                                                  \
-        };                                                                                      \
-    })
+static inline __attribute__((always_inline)) void mem_write8_internal(struct gba *gba, uint32_t addr, uint8_t val) {
+    uint32_t region = addr >> 24;
+    
+    switch (region) {
+        case BIOS_REGION:
+            // Ignore writes to BIOS
+            break;
+            
+        case EWRAM_REGION:
+            gba->memory.ewram[addr & EWRAM_MASK] = val;
+            break;
+            
+        case IWRAM_REGION:
+            gba->memory.iwram[addr & IWRAM_MASK] = val;
+            break;
+            
+        case IO_REGION:
+            mem_io_write8(gba, addr, val);
+            break;
+            
+        case PALRAM_REGION: {
+            // 8-bit writes to PALRAM write to both upper and lower bytes
+            addr &= ~1;
+            gba->memory.palram[addr & PALRAM_MASK] = val;
+            gba->memory.palram[(addr + 1) & PALRAM_MASK] = val;
+            break;
+        }
+            
+        case VRAM_REGION: {
+            uint32_t vram_addr = addr & 0x1FFFF;
+            // Ignore 8-bit writes to OBJ VRAM
+            if ((gba->io.dispcnt.bg_mode <= 2 && vram_addr < 0x10000) ||
+                (gba->io.dispcnt.bg_mode >= 3 && vram_addr < 0x14000)) {
+                addr &= ~1;
+                gba->memory.vram[addr & ((addr & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2)] = val;
+                gba->memory.vram[(addr + 1) & (((addr + 1) & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2)] = val;
+            }
+            break;
+        }
+            
+        case OAM_REGION:
+            // Ignore 8-bit writes to OAM
+            break;
+            
+        case CART_REGION_START ... CART_REGION_END: {
+            if ((gba->memory.backup_storage.type == BACKUP_EEPROM_4K || 
+                 gba->memory.backup_storage.type == BACKUP_EEPROM_64K) &&
+                (addr & gba->memory.backup_storage.chip.eeprom.mask) == 
+                 gba->memory.backup_storage.chip.eeprom.range) {
+                mem_eeprom_write8(gba, val & 1);
+            } else if (addr >= GPIO_REG_START && addr <= GPIO_REG_END) {
+                gpio_write_u8(gba, addr, val);
+            }
+            // Otherwise ignore writes to ROM
+            break;
+        }
+            
+        case SRAM_REGION:
+        case SRAM_MIRROR_REGION:
+            mem_backup_storage_write8(gba, addr, val);
+            break;
+            
+        default:
+            logln(HS_MEMORY, "Invalid write of size 1 to 0x%08x", addr);
+            break;
+    }
+}
 
+static inline __attribute__((always_inline)) void mem_write16_internal(struct gba *gba, uint32_t addr, uint16_t val) {
+    addr &= ~1;  // Align to 16-bit
+    uint32_t region = addr >> 24;
+    
+    switch (region) {
+        case BIOS_REGION:
+            // Ignore writes to BIOS
+            break;
+            
+        case EWRAM_REGION:
+            *(uint16_t *)&gba->memory.ewram[addr & EWRAM_MASK] = val;
+            break;
+            
+        case IWRAM_REGION:
+            *(uint16_t *)&gba->memory.iwram[addr & IWRAM_MASK] = val;
+            break;
+            
+        case IO_REGION:
+            mem_io_write8(gba, addr + 0, (uint8_t)(val >> 0));
+            mem_io_write8(gba, addr + 1, (uint8_t)(val >> 8));
+            break;
+            
+        case PALRAM_REGION:
+            *(uint16_t *)&gba->memory.palram[addr & PALRAM_MASK] = val;
+            break;
+            
+        case VRAM_REGION:
+            *(uint16_t *)&gba->memory.vram[addr & ((addr & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2)] = val;
+            break;
+            
+        case OAM_REGION:
+            *(uint16_t *)&gba->memory.oam[addr & OAM_MASK] = val;
+            break;
+            
+        case CART_REGION_START ... CART_REGION_END: {
+            if ((gba->memory.backup_storage.type == BACKUP_EEPROM_4K || 
+                 gba->memory.backup_storage.type == BACKUP_EEPROM_64K) &&
+                (addr & gba->memory.backup_storage.chip.eeprom.mask) == 
+                 gba->memory.backup_storage.chip.eeprom.range) {
+                mem_eeprom_write8(gba, val & 1);
+            } else if (addr >= GPIO_REG_START && addr <= GPIO_REG_END) {
+                gpio_write_u8(gba, addr, val);
+            }
+            // Otherwise ignore writes to ROM
+            break;
+        }
+            
+        case SRAM_REGION:
+        case SRAM_MIRROR_REGION:
+            // 16-bit writes to SRAM are rotated if unaligned
+            mem_backup_storage_write8(gba, addr, val >> (8 * (addr % 2)));
+            break;
+            
+        default:
+            logln(HS_MEMORY, "Invalid write of size 2 to 0x%08x", addr);
+            break;
+    }
+}
+
+static inline __attribute__((always_inline)) void mem_write32_internal(struct gba *gba, uint32_t addr, uint32_t val) {
+    addr &= ~3;  // Align to 32-bit
+    uint32_t region = addr >> 24;
+    
+    switch (region) {
+        case BIOS_REGION:
+            // Ignore writes to BIOS
+            break;
+            
+        case EWRAM_REGION:
+            *(uint32_t *)&gba->memory.ewram[addr & EWRAM_MASK] = val;
+            break;
+            
+        case IWRAM_REGION:
+            *(uint32_t *)&gba->memory.iwram[addr & IWRAM_MASK] = val;
+            break;
+            
+        case IO_REGION:
+            mem_io_write8(gba, addr + 0, (uint8_t)(val >>  0));
+            mem_io_write8(gba, addr + 1, (uint8_t)(val >>  8));
+            mem_io_write8(gba, addr + 2, (uint8_t)(val >> 16));
+            mem_io_write8(gba, addr + 3, (uint8_t)(val >> 24));
+            break;
+            
+        case PALRAM_REGION:
+            *(uint32_t *)&gba->memory.palram[addr & PALRAM_MASK] = val;
+            break;
+            
+        case VRAM_REGION:
+            *(uint32_t *)&gba->memory.vram[addr & ((addr & 0x10000) ? VRAM_MASK_1 : VRAM_MASK_2)] = val;
+            break;
+            
+        case OAM_REGION:
+            *(uint32_t *)&gba->memory.oam[addr & OAM_MASK] = val;
+            break;
+            
+        case CART_REGION_START ... CART_REGION_END: {
+            if ((gba->memory.backup_storage.type == BACKUP_EEPROM_4K || 
+                 gba->memory.backup_storage.type == BACKUP_EEPROM_64K) &&
+                (addr & gba->memory.backup_storage.chip.eeprom.mask) == 
+                 gba->memory.backup_storage.chip.eeprom.range) {
+                mem_eeprom_write8(gba, val & 1);
+            } else if (addr >= GPIO_REG_START && addr <= GPIO_REG_END) {
+                gpio_write_u8(gba, addr, val);
+            }
+            // Otherwise ignore writes to ROM
+            break;
+        }
+            
+        case SRAM_REGION:
+        case SRAM_MIRROR_REGION:
+            // 32-bit writes to SRAM are rotated if unaligned
+            mem_backup_storage_write8(gba, addr, val >> (8 * (addr % 4)));
+            break;
+            
+        default:
+            logln(HS_MEMORY, "Invalid write of size 4 to 0x%08x", addr);
+            break;
+    }
+}
+
+/*
+** Public API - Read functions
+*/
 uint8_t
 mem_read8_raw(
     struct gba *gba,
     uint32_t addr
 ) {
-    return (template_read(uint8_t, gba, addr));
+    return mem_read8_internal(gba, addr);
 }
 
-/*
-** Read the byte at the given address.
-*/
 uint8_t
 mem_read8(
     struct gba *gba,
@@ -506,7 +674,7 @@ mem_read8(
 #endif
 
     mem_access(gba, addr, sizeof(uint8_t), access_type);
-    return (template_read(uint8_t, gba, addr));
+    return mem_read8_internal(gba, addr);
 }
 
 uint16_t
@@ -514,12 +682,9 @@ mem_read16_raw(
     struct gba *gba,
     uint32_t addr
 ) {
-    return (template_read(uint16_t, gba, addr));
+    return mem_read16_internal(gba, addr);
 }
 
-/*
-** Read the half-word at the given address.
-*/
 uint16_t
 mem_read16(
     struct gba *gba,
@@ -531,13 +696,9 @@ mem_read16(
 #endif
 
     mem_access(gba, addr, sizeof(uint16_t), access_type);
-    return (template_read(uint16_t, gba, addr));
+    return mem_read16_internal(gba, addr);
 }
 
-/*
-** Read the half-word at the given address and ROR it if the
-** address isn't aligned.
-*/
 uint32_t
 mem_read16_ror(
     struct gba *gba,
@@ -554,7 +715,7 @@ mem_read16_ror(
     mem_access(gba, addr, sizeof(uint16_t), access_type);
 
     rotate = (addr & 0b1) * 8;
-    value = template_read(uint16_t, gba, addr);
+    value = mem_read16_internal(gba, addr);
 
     /* Unaligned 16-bits loads are supposed to be unpredictable, but in practise the GBA rotates them */
     return (ror32(value, rotate));
@@ -565,12 +726,9 @@ mem_read32_raw(
     struct gba *gba,
     uint32_t addr
 ) {
-    return (template_read(uint32_t, gba, addr));
+    return mem_read32_internal(gba, addr);
 }
 
-/*
-** Read the word at the given address.
-*/
 uint32_t
 mem_read32(
     struct gba *gba,
@@ -582,13 +740,9 @@ mem_read32(
 #endif
 
     mem_access(gba, addr, sizeof(uint32_t), access_type);
-    return (template_read(uint32_t, gba, addr));
+    return mem_read32_internal(gba, addr);
 }
 
-/*
-** Read the word at the given address and ROR it if the
-** address isn't aligned.
-*/
 uint32_t
 mem_read32_ror(
     struct gba *gba,
@@ -605,23 +759,23 @@ mem_read32_ror(
     mem_access(gba, addr, sizeof(uint32_t), access_type);
 
     rotate = (addr % 4) << 3;
-    value = template_read(uint32_t, gba, addr);
+    value = mem_read32_internal(gba, addr);
 
     return (ror32(value, rotate));
 }
 
+/*
+** Public API - Write functions
+*/
 void
 mem_write8_raw(
     struct gba *gba,
     uint32_t addr,
     uint8_t val
 ) {
-    template_write(uint8_t, gba, addr, val);
+    mem_write8_internal(gba, addr, val);
 }
 
-/*
-** Write a byte at the given address.
-*/
 void
 mem_write8(
     struct gba *gba,
@@ -634,7 +788,7 @@ mem_write8(
 #endif
 
     mem_access(gba, addr, sizeof(uint8_t), access_type);
-    template_write(uint8_t, gba, addr, val);
+    mem_write8_internal(gba, addr, val);
 }
 
 void
@@ -643,13 +797,9 @@ mem_write16_raw(
     uint32_t addr,
     uint16_t val
 ) {
-    template_write(uint16_t, gba, addr, val);
+    mem_write16_internal(gba, addr, val);
 }
 
-
-/*
-** write a half-word at the given address.
-*/
 void
 mem_write16(
     struct gba *gba,
@@ -662,7 +812,7 @@ mem_write16(
 #endif
 
     mem_access(gba, addr, sizeof(uint16_t), access_type);
-    template_write(uint16_t, gba, addr, val);
+    mem_write16_internal(gba, addr, val);
 }
 
 void
@@ -671,12 +821,9 @@ mem_write32_raw(
     uint32_t addr,
     uint32_t val
 ) {
-    template_write(uint32_t, gba, addr, val);
+    mem_write32_internal(gba, addr, val);
 }
 
-/*
-** Write a word at the given address.
-*/
 void
 mem_write32(
     struct gba *gba,
@@ -689,5 +836,5 @@ mem_write32(
 #endif
 
     mem_access(gba, addr, sizeof(uint32_t), access_type);
-    template_write(uint32_t, gba, addr, val);
+    mem_write32_internal(gba, addr, val);
 }
