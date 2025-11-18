@@ -16,10 +16,6 @@
 #include "gba/gpio.h"
 
 
-#define SHZ_FORCE_INLINE         __attribute__((always_inline)) SHZ_INLINE
-//! Prevents GCC from inlining the given function.
-
-
 /*
 ** Region        Bus   Read      Write     Cycles   Note
 ** ==================================================
