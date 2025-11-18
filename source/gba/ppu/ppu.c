@@ -306,11 +306,11 @@ ppu_draw_scanline(
         struct rich_color c;
 
         c = scanline->result[x];
-        gba->ppu.framebuffer[GBA_SCREEN_WIDTH * y + x] = 0xFF000000
-            | (((uint32_t)c.red   << 3 ) | (((uint32_t)c.red   >> 2) & 0b111)) << 0
-            | (((uint32_t)c.green << 3 ) | (((uint32_t)c.green >> 2) & 0b111)) << 8
-            | (((uint32_t)c.blue  << 3 ) | (((uint32_t)c.blue  >> 2) & 0b111)) << 16
-        ;
+        // Output RGB565 directly
+        gba->ppu.framebuffer[GBA_SCREEN_WIDTH * y + x] = 
+            ((c.red & 0x1F) << 11) |                    // R (5 bits)
+            (((c.green << 1) | (c.green >> 4)) << 5) |  // G (expand 5 to 6 bits)
+            (c.blue & 0x1F);                            // B (5 bits)
     }
 }
 

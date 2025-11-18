@@ -53,7 +53,7 @@ enum keys {
 struct shared_data {
     // The emulator's screen, as built by the PPU each frame.
     struct {
-        uint32_t data[GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT];
+        uint16_t data[GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT];
         pthread_mutex_t lock;
     } framebuffer;
 

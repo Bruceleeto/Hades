@@ -10,3 +10,5 @@
 config.json
 .hades-dbg.history
 __pycache__
+.vscode/settings.json
+.vscode/settings.json

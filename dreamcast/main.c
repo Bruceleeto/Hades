@@ -9,6 +9,7 @@
 #include "gba/event.h"
 #include <kos/fs.h>
 
+
 #define ROM_PATH    "/cd/assets/test.bin"
 #define BIOS_PATH   "/cd/assets/gba_bios.bin"
 #define SAVE_PATH   "pokemon.sav"
@@ -142,7 +143,7 @@ bool gba_load_and_start(const char *rom_path, const char *bios_path, const char 
     
     // Configure settings
     msg.config.skip_bios = false;
-    msg.config.backup_storage.type = BACKUP_FLASH128;
+    msg.config.backup_storage.type = BACKUP_NONE;
     msg.config.gpio_device_type = GPIO_NONE;
     
     msg.config.settings.speed = 1.0f;
@@ -218,27 +219,19 @@ void present_gba_frame(void) {
     if (!app.pvram_sq) return;
     
     gba_shared_framebuffer_lock(app.gba);
-    uint32_t *src = (uint32_t *)app.gba->shared_data.framebuffer.data;
+    uint16_t *src = app.gba->shared_data.framebuffer.data;
     
-    // Convert ABGR8888 to RGB565
     for (int y = 0; y < GBA_HEIGHT; y++) {
         uint32_t *dest_line32 = app.pvram_sq + (TEX_WIDTH / 2) * y;
         uint16_t *dest_line16 = (uint16_t *)dest_line32;
         sq_lock(dest_line32);
-        for (int x = 0; x < GBA_WIDTH; x++) {
-            uint32_t abgr = src[y * GBA_WIDTH + x];
-            uint8_t r = abgr & 0xFF;
-            uint8_t g = (abgr >> 8) & 0xFF;
-            uint8_t b = (abgr >> 16) & 0xFF;
-            dest_line16[x] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3);
-        }
+        memcpy(&dest_line16[0], &src[y * GBA_WIDTH], GBA_WIDTH * sizeof(uint16_t));
         sq_unlock();
     }
     
     gba_shared_framebuffer_release(app.gba);
     
     // Render fullscreen quad
-    pvr_wait_ready();
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_OP_POLY);
     
@@ -248,7 +241,7 @@ void present_gba_frame(void) {
     
     pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY,
         PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED,
-        TEX_WIDTH, TEX_HEIGHT, app.pvram, PVR_FILTER_BILINEAR);
+        TEX_WIDTH, TEX_HEIGHT, app.pvram, PVR_FILTER_NONE);
     
     pvr_poly_compile(&hdr, &cxt);
     pvr_prim(&hdr, sizeof(hdr));
@@ -288,7 +281,7 @@ void present_gba_frame(void) {
 bool init_system(void) {
     pvr_init_defaults();
     
-    app.pvram = pvr_mem_malloc(TEX_WIDTH * TEX_HEIGHT * 2);
+    app.pvram = pvr_mem_malloc(TEX_WIDTH * TEX_HEIGHT);
     if (!app.pvram) {
         fprintf(stderr, "Failed to allocate PVR memory\n");
         return false;

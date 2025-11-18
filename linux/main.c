@@ -254,11 +254,12 @@ bool init_sdl(void) {
     // Create framebuffer texture
     app.framebuffer_tex = SDL_CreateTexture(
         app.renderer,
-        SDL_PIXELFORMAT_ABGR8888,  // Change from ARGB to ABGR
+        SDL_PIXELFORMAT_RGB565,  // Match PPU output format
         SDL_TEXTUREACCESS_STREAMING,
         240,
         160
     );
+
     if (!app.framebuffer_tex) {
         fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
         return false;
@@ -353,8 +354,9 @@ int main(int argc, char *argv[]) {
             app.framebuffer_tex,
             NULL,
             app.gba->shared_data.framebuffer.data,
-            240 * 4  // GBA_SCREEN_WIDTH * sizeof(uint32_t)
+            240 * 2  // GBA_SCREEN_WIDTH * sizeof(uint16_t) for RGB565
         );
+
         gba_shared_framebuffer_release(app.gba);
         
         // Render
